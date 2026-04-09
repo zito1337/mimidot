@@ -1,0 +1,4 @@
+Copyright (c) 2017 Andrea Calabro
+
+The Godot Engine logo and icon are distributed under the Creative Commons
+Attribution 4.0 International License (CC BY 4.0).

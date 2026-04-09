@@ -1,0 +1,9 @@
+short_name = "mimidot"
+name = "mimidot"
+major = 4
+minor = 6
+patch = 2
+status = "stable"
+module_config = ""
+website = ""
+docs = "4.6"

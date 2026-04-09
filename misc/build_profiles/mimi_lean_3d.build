@@ -1,0 +1,14 @@
+{
+  "type": "build_profile",
+  "disabled_build_options": {
+    "disable_navigation_2d": true,
+    "disable_navigation_3d": true,
+    "disable_xr": true,
+    "module_openxr_enabled": false,
+    "module_text_server_adv_enabled": false,
+    "brotli": false,
+    "graphite": false,
+    "module_msdfgen_enabled": false,
+    "module_jolt_physics_enabled": false
+  }
+}
