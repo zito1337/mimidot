@@ -1,76 +1,121 @@
-# Godot Engine
+# mimidot
 
 <p align="center">
-  <a href="https://godotengine.org">
-    <img src="logo_outlined.svg" width="400" alt="Godot Engine logo">
-  </a>
+  <img src="logo_outlined.png" width="400" alt="mimidot logo">
 </p>
 
-## 2D and 3D cross-platform game engine
+`mimidot` is a gameplay-first Godot fork aimed at removing workflow friction instead of piling on theoretical features.
 
-**Mimidot Engine is a [Godot Engine](https://godotengine.org) for, and Godot Engine is a feature-packed, cross-platform
-game engine to create 2D and 3D games from a unified interface.** It provides a
-comprehensive set of [common tools](https://godotengine.org/features), so that
-users can focus on making games without having to reinvent the wheel. Games can
-be exported with one click to a number of platforms, including the major desktop
-platforms (Linux, macOS, Windows), mobile platforms (Android, iOS), as well as
-Web-based platforms and [consoles](https://godotengine.org/consoles).
+## Why pick mimidot
 
-## Free, open source and community-driven
+- It keeps the scene tree, node workflow, and GDScript pipeline that already make Godot fast to iterate with.
+- It fixes small but constant editor annoyances that slow down actual game work.
+- It includes `Mimi Optimizer` so Windows exports can skip optional runtime baggage without forcing a separate renderer mode.
 
-Godot is completely free and open source under the very permissive [MIT license](https://godotengine.org/license).
-No strings attached, no royalties, nothing. The users' games are theirs, down
-to the last line of engine code. Godot's development is fully independent and
-community-driven, empowering users to help shape their engine to match their
-expectations. It is supported by the [Godot Foundation](https://godot.foundation/)
-not-for-profit.
+## What is different from stock Godot
 
-Before being open sourced in [February 2014](https://github.com/godotengine/godot/commit/0b806ee0fc9097fa7bda7ac0109191c9c5e0a1ac),
-Godot had been developed by [Juan Linietsky](https://github.com/reduz) and
-[Ariel Manzur](https://github.com/punto-) for several years as an in-house
-engine, used to publish several work-for-hire titles.
+- Brown / light-brown / dark-brown editor theme defaults.
+- Inspector numeric edits apply more immediately while typing.
+- `Ctrl+S` commits the active inspector field before saving.
+- 3D editor navigation pans with `MMB` by default, while `Shift + MMB` orbits.
+- Windows export presets include `Mimi Optimizer`.
+- Built-in unity-like WSR (without using external viewports).
 
-![Screenshot of a 3D scene in the Godot Engine editor](https://raw.githubusercontent.com/godotengine/godot-design/master/screenshots/editor_tps_demo_1920x1080.jpg)
+## Recent mimidot changes
 
-## Getting the engine
+- `Mimi Optimizer` now stays focused on safe Windows export trimming instead of relying on a separate renderer experiment.
+- Top-level `Control` nodes can use `World Space Rendering` to project UI through a chosen `Camera3D` in runtime while still being authored like normal 2D UI.
+- `World Space Rendering` exposes camera assignment, near distance, 3D transform, and follow damping settings directly on the `Control`.
 
-### Binary downloads
+## World Space Rendering
 
-Official binaries for the Godot editor and the export templates can be found
-[on the Godot website](https://godotengine.org/download).
+`World Space Rendering` is now built into top-level `Control` roots.
 
-### Compiling from source
+What it does:
 
-[See the official docs](https://docs.godotengine.org/en/latest/engine_details/development/compiling)
-for compilation instructions for every supported platform.
+- keeps the UI authored as a regular `Control` tree,
+- lets the same UI render in front of a `Camera3D` in runtime,
+- keeps the UI size stable on screen while still participating in 3D depth,
+- exposes extra camera-relative transform controls for stylized HUD and in-world overlay work.
 
-## Community and contributing
+Main properties:
 
-Godot is not only an engine but an ever-growing community of users and engine
-developers. The main community channels are listed [on the homepage](https://godotengine.org/community).
+- `world_space_rendering_enabled`
+- `world_space_rendering_camera`
+- `world_space_rendering_near`
+- `world_space_rendering_transform_position`
+- `world_space_rendering_transform_rotation_degrees`
+- `world_space_rendering_transform_scale`
+- `world_space_rendering_follow_damping_enabled`
+- `world_space_rendering_follow_damping_speed`
 
-The best way to get in touch with the core engine developers is to join the
-[Godot Contributors Chat](https://chat.godotengine.org).
+Script access:
 
-To get started contributing to the project, see the [contributing guide](CONTRIBUTING.md).
-This document also includes guidelines for reporting bugs.
+```gdscript
+ui_root.set_world_space_rendering_enabled(true)
+ui_root.set_world_space_rendering_camera($Camera3D)
+ui_root.set_world_space_rendering_near(0.8)
+ui_root.set_world_space_rendering_position(Vector3(0.0, -0.15, 0.0))
+ui_root.set_world_space_rendering_rotation_degrees(Vector3(-6.0, 0.0, 0.0))
+ui_root.set_world_space_rendering_scale(Vector3.ONE)
+ui_root.set_world_space_rendering_follow_damping_enabled(true)
+ui_root.set_world_space_rendering_follow_damping(10.0)
+```
 
-## Documentation and demos
+Notes:
 
-The official documentation is hosted on [Read the Docs](https://docs.godotengine.org).
-It is maintained by the Godot community in its own [GitHub repository](https://github.com/godotengine/godot-docs).
+- It is intended for top-level `Control` nodes, not nested button/label children.
+- If the assigned camera is missing, mimidot prints a warning at runtime and keeps the feature disabled until a valid `Camera3D` is assigned.
+- If `world_space_rendering_near` is smaller than the camera near plane, fuck you. Change it please.
 
-The [class reference](https://docs.godotengine.org/en/latest/classes/)
-is also accessible from the Godot editor.
+## Mimi Optimizer
 
-We also maintain official demos in their own [GitHub repository](https://github.com/godotengine/godot-demo-projects)
-as well as a list of [awesome Godot community resources](https://github.com/godotengine/awesome-godot).
+`Mimi Optimizer` lives in the Windows export preset options and focuses on reducing the final runnable folder size.
 
-There are also a number of other
-[learning resources](https://docs.godotengine.org/en/latest/community/tutorials.html)
-provided by the community, such as text and video tutorials, demos, etc.
-Consult the [community channels](https://godotengine.org/community)
-for more information.
+Current features:
 
-[![Code Triagers Badge](https://www.codetriage.com/godotengine/godot/badges/users.svg)](https://www.codetriage.com/godotengine/godot)
-[![Translate on Weblate](https://hosted.weblate.org/widgets/godot-engine/-/godot/svg-badge.svg)](https://hosted.weblate.org/engage/godot-engine/?utm_source=widget)
+- optional trimming of `AccessKit`, `ANGLE`, and `D3D12` runtime DLLs,
+- safer export-side optimization without forking the project renderer,
+- clearer status feedback inside the export dialog.
+
+## Build workflow on Windows
+
+Typical tools:
+
+- `MSYS2 UCRT64`
+- `MinGW-w64`
+- `SCons`
+- VS Code
+
+VS Code tasks included in this repo:
+
+- `Build mimidot editor (Release, Max)` is the default `Ctrl+Shift+B` task and uses 12 logical processors.
+- `Build mimidot editor (Release, Balanced)` is still available if you want a less aggressive build while working.
+- `F5` launches the console editor build through `gdb` and uses the max-parallel build task first.
+
+Manual release build:
+
+```powershell
+C:\msys64\ucrt64\bin\scons.exe platform=windows target=editor production=yes arch=x86_64 use_mingw=yes debug_symbols=no -j12
+```
+
+## Direction of the fork
+
+`mimidot` is not trying to stay neutral. The goal is to keep stacking practical changes that help real projects move faster:
+
+- tighter editor UX,
+- cleaner Windows exports,
+- better day-to-day solo-dev ergonomics,
+- and fewer moments where the engine sometimes ruins everything.
+
+## - Hey! I wanna build something for windows without recompiling this shit!
+
+Basically, everything you need is to download `mimidot_1.0-release_win_templates_x84_64.zip` in realeases and put them in a directory mimidot does want to get.
+Directories list:
+```
+%APPDATA%\\Mimidot\\export_templates\\4.6.2.stable\\windows_release_x86_64.exe
+%APPDATA%\\Mimidot\\export_templates\\4.6.2.stable\\windows_release_x86_64_console.exe
+%APPDATA%\\Mimidot\\export_templates\\4.6.2.stable\\windows_debug_x86_64.exe
+%APPDATA%\\Mimidot\\export_templates\\4.6.2.stable\\windows_debug_x86_64_console.exe
+```
+That's all, actually. No crossplatform without recompiling it yourself tho. Gonna add crossplatform any time soon :)

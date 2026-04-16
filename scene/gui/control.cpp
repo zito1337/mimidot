@@ -36,9 +36,13 @@
 #include "core/input/input_map.h"
 #include "core/os/os.h"
 #include "core/string/string_builder.h"
+#include "scene/3d/camera_3d.h"
+#include "scene/3d/sprite_3d.h"
 #include "scene/gui/scroll_container.h"
 #include "scene/main/canvas_layer.h"
+#include "scene/main/viewport.h"
 #include "scene/main/window.h"
+#include "scene/resources/world_2d.h"
 #include "scene/theme/theme_db.h"
 #include "scene/theme/theme_owner.h"
 #include "servers/rendering/rendering_server.h"
@@ -47,6 +51,36 @@
 #ifdef TOOLS_ENABLED
 #include "editor/scene/gui/control_editor_plugin.h"
 #endif // TOOLS_ENABLED
+
+static Quaternion _world_space_apply_follow_damping_multiplier(const Quaternion &p_target, const Quaternion &p_smoothed, real_t p_multiplier) {
+	if (Math::is_zero_approx(p_multiplier)) {
+		return p_target;
+	}
+
+	if (Math::is_equal_approx(p_multiplier, (real_t)1.0)) {
+		return p_smoothed.normalized();
+	}
+
+	Quaternion target = p_target.normalized();
+	Quaternion smoothed = p_smoothed.normalized();
+	if (target.dot(smoothed) < 0.0) {
+		smoothed = Quaternion(-smoothed.x, -smoothed.y, -smoothed.z, -smoothed.w);
+	}
+
+	Quaternion delta = (target.inverse() * smoothed).normalized();
+	const real_t delta_angle = delta.get_angle();
+	if (delta_angle < (real_t)0.0005) {
+		return target;
+	}
+
+	Vector3 delta_axis = delta.get_axis();
+	if (delta_axis.is_zero_approx()) {
+		return target;
+	}
+	delta_axis = delta_axis.normalized();
+
+	return (target * Quaternion(delta_axis, delta_angle * p_multiplier)).normalized();
+}
 
 // Editor plugin interoperability.
 
@@ -252,7 +286,308 @@ PackedStringArray Control::get_configuration_warnings() const {
 		warnings.push_back(RTR("The Hint Tooltip won't be displayed as the control's Mouse Filter is set to \"Ignore\". To solve this, set the Mouse Filter to \"Stop\" or \"Pass\"."));
 	}
 
+	if (world_space_rendering.enabled) {
+		if (!_is_world_space_rendering_allowed()) {
+			warnings.push_back(RTR("World Space Rendering is only available on top-level Control roots."));
+		} else if (world_space_rendering.camera_path.is_empty() && !world_space_rendering.camera_id.is_valid()) {
+			warnings.push_back(RTR("World Space Rendering needs a Camera3D reference. Assign one, or disable the feature if it is no longer used."));
+		} else if (Camera3D *camera = get_world_space_rendering_camera()) {
+			if (world_space_rendering.near_distance < camera->get_near()) {
+				warnings.push_back(RTR("World Space Rendering Near is smaller than the assigned camera Near. The runtime will clamp it to the camera Near value."));
+			}
+		}
+	}
+
 	return warnings;
+}
+
+bool Control::_is_world_space_rendering_allowed() const {
+	return get_parent_control() == nullptr;
+}
+
+bool Control::_uses_world_space_rendering_runtime() const {
+	return world_space_rendering.enabled && _is_world_space_rendering_allowed() && !Engine::get_singleton()->is_editor_hint();
+}
+
+Transform2D Control::_get_world_space_canvas_transform() const {
+	if (!is_inside_tree()) {
+		return Transform2D();
+	}
+
+	return get_global_transform_with_canvas().affine_inverse();
+}
+
+Transform3D Control::_get_world_space_camera_target_transform(Camera3D *p_camera) const {
+	ERR_FAIL_NULL_V(p_camera, Transform3D());
+	return p_camera->get_camera_transform();
+}
+
+Transform3D Control::_get_world_space_local_transform(real_t p_effective_near) const {
+	const real_t effective_near = MAX(world_space_rendering.near_distance, p_effective_near);
+	Basis local_basis = Basis::from_euler(Vector3(
+			Math::deg_to_rad(world_space_rendering.rotation_degrees.x),
+			Math::deg_to_rad(world_space_rendering.rotation_degrees.y),
+			Math::deg_to_rad(world_space_rendering.rotation_degrees.z)));
+	local_basis = local_basis.scaled(world_space_rendering.scale);
+
+	Vector3 local_origin = world_space_rendering.position;
+	local_origin.z = -effective_near - local_origin.z;
+
+	return Transform3D(local_basis, local_origin);
+}
+
+Transform3D Control::_get_world_space_target_transform(Camera3D *p_camera) const {
+	ERR_FAIL_NULL_V(p_camera, Transform3D());
+	return _get_world_space_camera_target_transform(p_camera) * _get_world_space_local_transform(p_camera->get_near());
+}
+
+void Control::_restore_world_space_canvas_parent() {
+	if (!is_inside_tree()) {
+		return;
+	}
+
+	CanvasItem *parent_item = get_parent_item();
+	if (parent_item) {
+		RenderingServer::get_singleton()->canvas_item_set_parent(get_canvas_item(), parent_item->get_canvas_item());
+		return;
+	}
+
+	Node *node = this;
+	CanvasLayer *root_canvas_layer = nullptr;
+	while (node) {
+		root_canvas_layer = Object::cast_to<CanvasLayer>(node);
+		if (root_canvas_layer || Object::cast_to<Viewport>(node)) {
+			break;
+		}
+		node = node->get_parent();
+	}
+
+	RID canvas = root_canvas_layer ? root_canvas_layer->get_canvas() : get_viewport()->find_world_2d()->get_canvas();
+	RenderingServer::get_singleton()->canvas_item_set_parent(get_canvas_item(), canvas);
+}
+
+void Control::_update_world_space_gui_root() {
+	if (!is_inside_tree() || data.parent_canvas_item) {
+		return;
+	}
+
+	Viewport *viewport = get_viewport();
+	ERR_FAIL_NULL(viewport);
+
+	if (_uses_world_space_rendering_runtime()) {
+		if (data.RI) {
+			viewport->_gui_remove_root_control(data.RI);
+			data.RI = nullptr;
+			if (get_parent()) {
+				get_parent()->disconnect(SNAME("child_order_changed"), callable_mp(viewport, &Viewport::gui_set_root_order_dirty));
+			}
+		}
+	} else if (!data.RI) {
+		data.RI = viewport->_gui_add_root_control(this);
+		if (get_parent()) {
+			get_parent()->connect(SNAME("child_order_changed"), callable_mp(viewport, &Viewport::gui_set_root_order_dirty), CONNECT_REFERENCE_COUNTED);
+		}
+	}
+}
+
+void Control::_ensure_world_space_runtime_nodes() {
+	if (!world_space_rendering.canvas.is_valid()) {
+		world_space_rendering.canvas = RenderingServer::get_singleton()->canvas_create();
+	}
+
+	if (!world_space_rendering.viewport) {
+		world_space_rendering.viewport = memnew(SubViewport);
+		world_space_rendering.viewport->set_name("_WorldSpaceViewport");
+		world_space_rendering.viewport->set_disable_3d(true);
+		world_space_rendering.viewport->set_disable_input(true);
+		world_space_rendering.viewport->set_handle_input_locally(false);
+		world_space_rendering.viewport->set_transparent_background(true);
+		world_space_rendering.viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
+		world_space_rendering.viewport->set_size(Size2i(1, 1));
+		add_child(world_space_rendering.viewport, false, INTERNAL_MODE_BACK);
+
+		RenderingServer::get_singleton()->viewport_attach_canvas(world_space_rendering.viewport->get_viewport_rid(), world_space_rendering.canvas);
+	}
+
+	if (!world_space_rendering.sprite) {
+		world_space_rendering.sprite = memnew(Sprite3D);
+		world_space_rendering.sprite->set_name("_WorldSpaceSprite");
+		world_space_rendering.sprite->set_as_top_level(true);
+		world_space_rendering.sprite->set_texture_filter(StandardMaterial3D::TEXTURE_FILTER_LINEAR);
+		world_space_rendering.sprite->set_draw_flag(SpriteBase3D::FLAG_DOUBLE_SIDED, true);
+		world_space_rendering.sprite->set_draw_flag(SpriteBase3D::FLAG_DISABLE_DEPTH_TEST, false);
+		world_space_rendering.sprite->set_centered(true);
+		add_child(world_space_rendering.sprite, false, INTERNAL_MODE_BACK);
+	}
+
+	world_space_rendering.sprite->set_texture(world_space_rendering.viewport->get_texture());
+}
+
+void Control::_clear_world_space_runtime_nodes() {
+	if (world_space_rendering.viewport && world_space_rendering.canvas.is_valid()) {
+		RenderingServer::get_singleton()->viewport_remove_canvas(world_space_rendering.viewport->get_viewport_rid(), world_space_rendering.canvas);
+	}
+
+	if (world_space_rendering.sprite) {
+		world_space_rendering.sprite->queue_free();
+		world_space_rendering.sprite = nullptr;
+	}
+
+	if (world_space_rendering.viewport) {
+		world_space_rendering.viewport->queue_free();
+		world_space_rendering.viewport = nullptr;
+	}
+
+	if (world_space_rendering.canvas.is_valid()) {
+		RenderingServer::get_singleton()->free_rid(world_space_rendering.canvas);
+		world_space_rendering.canvas = RID();
+	}
+
+	world_space_rendering.warned_missing_camera = false;
+	world_space_rendering.smoothing_initialized = false;
+	world_space_rendering.late_update_queued = false;
+	world_space_rendering.queued_process_delta = 0.0;
+}
+
+void Control::_update_world_space_canvas() {
+	if (!_uses_world_space_rendering_runtime() || !is_inside_tree()) {
+		return;
+	}
+
+	_ensure_world_space_runtime_nodes();
+	RenderingServer::get_singleton()->canvas_item_set_parent(get_canvas_item(), world_space_rendering.canvas);
+
+	const Size2 size = get_size();
+	const Size2i viewport_size(MAX(1, (int)Math::ceil(size.x)), MAX(1, (int)Math::ceil(size.y)));
+	if (world_space_rendering.viewport->get_size() != viewport_size) {
+		world_space_rendering.viewport->set_size(viewport_size);
+	}
+
+	RenderingServer::get_singleton()->viewport_set_canvas_transform(world_space_rendering.viewport->get_viewport_rid(), world_space_rendering.canvas, _get_world_space_canvas_transform());
+}
+
+void Control::_update_world_space_rendering_state() {
+	if (!is_inside_tree()) {
+		return;
+	}
+
+	if (_uses_world_space_rendering_runtime()) {
+		_ensure_world_space_runtime_nodes();
+		if (Viewport *viewport = get_viewport()) {
+			viewport->_gui_hide_control(this);
+		}
+		release_focus();
+		_update_world_space_gui_root();
+		_update_world_space_canvas();
+		_update_world_space_rendering_transform(-1.0);
+		set_process_internal(true);
+	} else {
+		set_process_internal(false);
+		_restore_world_space_canvas_parent();
+		_update_world_space_gui_root();
+		_clear_world_space_runtime_nodes();
+	}
+}
+
+void Control::_update_world_space_rendering_transform_deferred() {
+	world_space_rendering.late_update_queued = false;
+
+	if (!_uses_world_space_rendering_runtime()) {
+		return;
+	}
+
+	_update_world_space_rendering_transform(world_space_rendering.queued_process_delta);
+}
+
+void Control::_update_world_space_rendering_transform(double p_delta) {
+	if (!_uses_world_space_rendering_runtime() || !world_space_rendering.sprite) {
+		return;
+	}
+
+	Camera3D *camera = get_world_space_rendering_camera();
+	if (!camera || !camera->is_inside_tree()) {
+		world_space_rendering.sprite->set_visible(false);
+		if (!world_space_rendering.warned_missing_camera) {
+			WARN_PRINT("World Space Rendering is enabled on a Control, but no valid Camera3D is assigned. Assign a camera or disable the feature.");
+			world_space_rendering.warned_missing_camera = true;
+		}
+		return;
+	}
+
+	world_space_rendering.warned_missing_camera = false;
+	world_space_rendering.sprite->set_visible(is_visible_in_tree());
+	if (!is_visible_in_tree()) {
+		return;
+	}
+
+	_update_world_space_canvas();
+
+	const real_t effective_near = MAX(world_space_rendering.near_distance, camera->get_near());
+	const Transform3D target_camera_transform = _get_world_space_camera_target_transform(camera);
+	const Transform3D local_transform = _get_world_space_local_transform(effective_near);
+	Transform3D render_camera_transform = target_camera_transform;
+	if (world_space_rendering.follow_damping_enabled && p_delta >= 0.0) {
+		if (!world_space_rendering.smoothing_initialized) {
+			world_space_rendering.smoothed_transform = target_camera_transform;
+			world_space_rendering.smoothing_initialized = true;
+		}
+
+		const real_t weight = CLAMP((real_t)(1.0 - Math::exp(-world_space_rendering.follow_damping * p_delta)), (real_t)0.0, (real_t)1.0);
+		const bool smooth_position = world_space_rendering.follow_damping_mode != WORLD_SPACE_RENDERING_FOLLOW_DAMPING_ROTATION;
+		const bool smooth_rotation = world_space_rendering.follow_damping_mode != WORLD_SPACE_RENDERING_FOLLOW_DAMPING_POSITION;
+		const real_t multiplier = MAX((real_t)0.0, world_space_rendering.follow_damping_multiplier);
+
+		if (smooth_position) {
+			world_space_rendering.smoothed_transform.origin = world_space_rendering.smoothed_transform.origin.lerp(target_camera_transform.origin, weight);
+			if (world_space_rendering.smoothed_transform.origin.distance_to(target_camera_transform.origin) < (real_t)0.0001) {
+				world_space_rendering.smoothed_transform.origin = target_camera_transform.origin;
+			}
+		} else {
+			world_space_rendering.smoothed_transform.origin = target_camera_transform.origin;
+		}
+
+		if (smooth_rotation) {
+			const Basis from_basis = world_space_rendering.smoothed_transform.basis.orthonormalized();
+			const Basis to_basis = target_camera_transform.basis.orthonormalized();
+			world_space_rendering.smoothed_transform.basis = from_basis.slerp(to_basis, weight);
+			const Quaternion smoothed_rotation = world_space_rendering.smoothed_transform.basis.get_rotation_quaternion().normalized();
+			const Quaternion target_rotation = to_basis.get_rotation_quaternion().normalized();
+			if (smoothed_rotation.angle_to(target_rotation) < (real_t)0.0005) {
+				world_space_rendering.smoothed_transform.basis = to_basis;
+			}
+		} else {
+			world_space_rendering.smoothed_transform.basis = target_camera_transform.basis;
+		}
+
+		render_camera_transform.origin = smooth_position ? target_camera_transform.origin + (world_space_rendering.smoothed_transform.origin - target_camera_transform.origin) * multiplier : target_camera_transform.origin;
+
+		if (smooth_rotation) {
+			const Quaternion target_rotation = target_camera_transform.basis.orthonormalized().get_rotation_quaternion();
+			const Quaternion smoothed_rotation = world_space_rendering.smoothed_transform.basis.orthonormalized().get_rotation_quaternion();
+			render_camera_transform.basis = Basis(_world_space_apply_follow_damping_multiplier(target_rotation, smoothed_rotation, multiplier));
+		} else {
+			render_camera_transform.basis = target_camera_transform.basis;
+		}
+	} else {
+		world_space_rendering.smoothing_initialized = false;
+		world_space_rendering.smoothed_transform = target_camera_transform;
+		render_camera_transform = target_camera_transform;
+	}
+
+	world_space_rendering.sprite->set_global_transform(render_camera_transform * local_transform);
+
+	Viewport *camera_viewport = camera->get_viewport();
+	const Size2 viewport_size = camera_viewport ? camera_viewport->get_visible_rect().size : get_viewport_rect().size;
+	const real_t viewport_height = MAX((real_t)1.0, viewport_size.y);
+
+	real_t pixel_size = 0.001;
+	if (camera->get_projection() == Camera3D::PROJECTION_PERSPECTIVE) {
+		pixel_size = (2.0 * effective_near * Math::tan(Math::deg_to_rad(camera->get_fov()) * 0.5)) / viewport_height;
+	} else {
+		pixel_size = (camera->get_size() * 2.0) / viewport_height;
+	}
+
+	world_space_rendering.sprite->set_pixel_size(pixel_size);
 }
 
 PackedStringArray Control::get_accessibility_configuration_warnings() const {
@@ -526,6 +861,19 @@ void Control::_validate_property(PropertyInfo &p_property) const {
 	if (Engine::get_singleton()->is_editor_hint() && p_property.name == "scale") {
 		p_property.hint = PROPERTY_HINT_LINK;
 	}
+
+	if (p_property.name.begins_with("world_space_rendering_")) {
+		if (!_is_world_space_rendering_allowed()) {
+			p_property.usage &= ~PROPERTY_USAGE_EDITOR;
+		} else if (!world_space_rendering.enabled &&
+				(p_property.name.begins_with("world_space_rendering_transform_") || p_property.name.begins_with("world_space_rendering_follow_damping_"))) {
+			p_property.usage &= ~PROPERTY_USAGE_EDITOR;
+		} else if (!world_space_rendering.follow_damping_enabled &&
+				p_property.name.begins_with("world_space_rendering_follow_damping_") &&
+				p_property.name != "world_space_rendering_follow_damping_enabled") {
+			p_property.usage &= ~PROPERTY_USAGE_EDITOR;
+		}
+	}
 	// Validate which positioning properties should be displayed depending on the parent and the layout mode.
 	Control *parent_control = get_parent_control();
 	if (Engine::get_singleton()->is_editor_hint() && !parent_control) {
@@ -734,6 +1082,10 @@ void Control::_update_canvas_item_transform() {
 	}
 
 	RenderingServer::get_singleton()->canvas_item_set_transform(get_canvas_item(), xform);
+
+	if (_uses_world_space_rendering_runtime()) {
+		_update_world_space_canvas();
+	}
 }
 
 Transform2D Control::get_transform() const {
@@ -747,6 +1099,9 @@ void Control::_top_level_changed_on_parent() {
 	// Update root control status.
 	_notification(NOTIFICATION_EXIT_CANVAS);
 	_notification(NOTIFICATION_ENTER_CANVAS);
+	notify_property_list_changed();
+	update_configuration_warnings();
+	_update_world_space_rendering_state();
 }
 
 /// Anchors and offsets.
@@ -1655,6 +2010,223 @@ Vector2 Control::get_combined_pivot_offset() const {
 	return data.pivot_offset + data.pivot_offset_ratio * get_size();
 }
 
+void Control::set_world_space_rendering_enabled(bool p_enabled) {
+	ERR_MAIN_THREAD_GUARD;
+	if (world_space_rendering.enabled == p_enabled) {
+		return;
+	}
+
+	world_space_rendering.enabled = p_enabled;
+	world_space_rendering.warned_missing_camera = false;
+	world_space_rendering.smoothing_initialized = false;
+	notify_property_list_changed();
+	update_configuration_warnings();
+	_update_world_space_rendering_state();
+}
+
+bool Control::is_world_space_rendering_enabled() const {
+	ERR_READ_THREAD_GUARD_V(false);
+	return world_space_rendering.enabled;
+}
+
+void Control::set_world_space_rendering_camera_path(const NodePath &p_camera_path) {
+	ERR_MAIN_THREAD_GUARD;
+	if (world_space_rendering.camera_path == p_camera_path) {
+		return;
+	}
+
+	world_space_rendering.camera_path = p_camera_path;
+	world_space_rendering.camera_id = ObjectID();
+	world_space_rendering.warned_missing_camera = false;
+	update_configuration_warnings();
+	_update_world_space_rendering_state();
+}
+
+NodePath Control::get_world_space_rendering_camera_path() const {
+	ERR_READ_THREAD_GUARD_V(NodePath());
+	return world_space_rendering.camera_path;
+}
+
+void Control::set_world_space_rendering_camera(Node *p_camera) {
+	ERR_MAIN_THREAD_GUARD;
+	Camera3D *camera = Object::cast_to<Camera3D>(p_camera);
+	world_space_rendering.camera_id = camera ? camera->get_instance_id() : ObjectID();
+	world_space_rendering.camera_path = (camera && is_inside_tree()) ? get_path_to(camera) : NodePath();
+	world_space_rendering.warned_missing_camera = false;
+	update_configuration_warnings();
+	_update_world_space_rendering_state();
+}
+
+Camera3D *Control::get_world_space_rendering_camera() const {
+	ERR_READ_THREAD_GUARD_V(nullptr);
+
+	if (world_space_rendering.camera_id.is_valid()) {
+		if (Object *object = ObjectDB::get_instance(world_space_rendering.camera_id)) {
+			if (Camera3D *camera = Object::cast_to<Camera3D>(object)) {
+				return camera;
+			}
+		}
+	}
+
+	if (!world_space_rendering.camera_path.is_empty() && is_inside_tree()) {
+		return Object::cast_to<Camera3D>(get_node_or_null(world_space_rendering.camera_path));
+	}
+
+	return nullptr;
+}
+
+void Control::set_world_space_rendering_near(real_t p_near) {
+	ERR_MAIN_THREAD_GUARD;
+	p_near = MAX((real_t)0.001, p_near);
+	if (Math::is_equal_approx(world_space_rendering.near_distance, p_near)) {
+		return;
+	}
+
+	world_space_rendering.near_distance = p_near;
+	update_configuration_warnings();
+	_update_world_space_rendering_state();
+}
+
+real_t Control::get_world_space_rendering_near() const {
+	ERR_READ_THREAD_GUARD_V(0.0);
+	return world_space_rendering.near_distance;
+}
+
+void Control::set_world_space_rendering_position(const Vector3 &p_position) {
+	ERR_MAIN_THREAD_GUARD;
+	if (world_space_rendering.position == p_position) {
+		return;
+	}
+
+	world_space_rendering.position = p_position;
+	_update_world_space_rendering_state();
+}
+
+Vector3 Control::get_world_space_rendering_position() const {
+	ERR_READ_THREAD_GUARD_V(Vector3());
+	return world_space_rendering.position;
+}
+
+void Control::set_world_space_rendering_rotation_degrees(const Vector3 &p_rotation) {
+	ERR_MAIN_THREAD_GUARD;
+	if (world_space_rendering.rotation_degrees == p_rotation) {
+		return;
+	}
+
+	world_space_rendering.rotation_degrees = p_rotation;
+	_update_world_space_rendering_state();
+}
+
+Vector3 Control::get_world_space_rendering_rotation_degrees() const {
+	ERR_READ_THREAD_GUARD_V(Vector3());
+	return world_space_rendering.rotation_degrees;
+}
+
+void Control::set_world_space_rendering_scale(const Vector3 &p_scale) {
+	ERR_MAIN_THREAD_GUARD;
+	if (world_space_rendering.scale == p_scale) {
+		return;
+	}
+
+	world_space_rendering.scale = p_scale;
+	_update_world_space_rendering_state();
+}
+
+Vector3 Control::get_world_space_rendering_scale() const {
+	ERR_READ_THREAD_GUARD_V(Vector3(1, 1, 1));
+	return world_space_rendering.scale;
+}
+
+void Control::set_world_space_rendering_transform(const Transform3D &p_transform) {
+	ERR_MAIN_THREAD_GUARD;
+	world_space_rendering.position = p_transform.origin;
+	world_space_rendering.scale = p_transform.basis.get_scale();
+	world_space_rendering.rotation_degrees = Vector3(
+			Math::rad_to_deg(p_transform.basis.orthonormalized().get_euler().x),
+			Math::rad_to_deg(p_transform.basis.orthonormalized().get_euler().y),
+			Math::rad_to_deg(p_transform.basis.orthonormalized().get_euler().z));
+	_update_world_space_rendering_state();
+}
+
+Transform3D Control::get_world_space_rendering_transform() const {
+	ERR_READ_THREAD_GUARD_V(Transform3D());
+
+	Basis basis = Basis::from_euler(Vector3(
+			Math::deg_to_rad(world_space_rendering.rotation_degrees.x),
+			Math::deg_to_rad(world_space_rendering.rotation_degrees.y),
+			Math::deg_to_rad(world_space_rendering.rotation_degrees.z)));
+	basis = basis.scaled(world_space_rendering.scale);
+	return Transform3D(basis, world_space_rendering.position);
+}
+
+void Control::set_world_space_rendering_follow_damping_enabled(bool p_enabled) {
+	ERR_MAIN_THREAD_GUARD;
+	if (world_space_rendering.follow_damping_enabled == p_enabled) {
+		return;
+	}
+
+	world_space_rendering.follow_damping_enabled = p_enabled;
+	world_space_rendering.smoothing_initialized = false;
+	notify_property_list_changed();
+	_update_world_space_rendering_state();
+}
+
+bool Control::is_world_space_rendering_follow_damping_enabled() const {
+	ERR_READ_THREAD_GUARD_V(false);
+	return world_space_rendering.follow_damping_enabled;
+}
+
+void Control::set_world_space_rendering_follow_damping_mode(WorldSpaceRenderingFollowDampingMode p_mode) {
+	ERR_MAIN_THREAD_GUARD;
+	ERR_FAIL_INDEX(p_mode, WORLD_SPACE_RENDERING_FOLLOW_DAMPING_BOTH + 1);
+	if (world_space_rendering.follow_damping_mode == p_mode) {
+		return;
+	}
+
+	world_space_rendering.follow_damping_mode = p_mode;
+	world_space_rendering.smoothing_initialized = false;
+	_update_world_space_rendering_state();
+}
+
+Control::WorldSpaceRenderingFollowDampingMode Control::get_world_space_rendering_follow_damping_mode() const {
+	ERR_READ_THREAD_GUARD_V(WORLD_SPACE_RENDERING_FOLLOW_DAMPING_BOTH);
+	return world_space_rendering.follow_damping_mode;
+}
+
+void Control::set_world_space_rendering_follow_damping(real_t p_damping) {
+	ERR_MAIN_THREAD_GUARD;
+	p_damping = MAX((real_t)0.01, p_damping);
+	if (Math::is_equal_approx(world_space_rendering.follow_damping, p_damping)) {
+		return;
+	}
+
+	world_space_rendering.follow_damping = p_damping;
+	world_space_rendering.smoothing_initialized = false;
+	_update_world_space_rendering_state();
+}
+
+real_t Control::get_world_space_rendering_follow_damping() const {
+	ERR_READ_THREAD_GUARD_V(0.0);
+	return world_space_rendering.follow_damping;
+}
+
+void Control::set_world_space_rendering_follow_damping_multiplier(real_t p_multiplier) {
+	ERR_MAIN_THREAD_GUARD;
+	p_multiplier = MAX((real_t)0.0, p_multiplier);
+	if (Math::is_equal_approx(world_space_rendering.follow_damping_multiplier, p_multiplier)) {
+		return;
+	}
+
+	world_space_rendering.follow_damping_multiplier = p_multiplier;
+	world_space_rendering.smoothing_initialized = false;
+	_update_world_space_rendering_state();
+}
+
+real_t Control::get_world_space_rendering_follow_damping_multiplier() const {
+	ERR_READ_THREAD_GUARD_V(1.0);
+	return world_space_rendering.follow_damping_multiplier;
+}
+
 /// Sizes.
 
 void Control::_update_minimum_size() {
@@ -1942,6 +2514,9 @@ Control::MouseFilter Control::get_mouse_filter() const {
 
 Control::MouseFilter Control::get_mouse_filter_with_override() const {
 	ERR_READ_THREAD_GUARD_V(MOUSE_FILTER_IGNORE);
+	if (_uses_world_space_rendering_runtime()) {
+		return MOUSE_FILTER_IGNORE;
+	}
 	if (!_is_mouse_filter_enabled()) {
 		return MOUSE_FILTER_IGNORE;
 	}
@@ -2284,6 +2859,9 @@ Control::FocusMode Control::get_focus_mode() const {
 
 Control::FocusMode Control::get_focus_mode_with_override() const {
 	ERR_READ_THREAD_GUARD_V(FOCUS_NONE);
+	if (_uses_world_space_rendering_runtime()) {
+		return FOCUS_NONE;
+	}
 	if (!_is_focus_mode_enabled()) {
 		return FOCUS_NONE;
 	}
@@ -3835,6 +4413,8 @@ void Control::_notification(int p_notification) {
 
 			_update_focus_behavior_recursive();
 			_update_mouse_behavior_recursive();
+			notify_property_list_changed();
+			update_configuration_warnings();
 		} break;
 
 		case NOTIFICATION_UNPARENTED: {
@@ -3842,6 +4422,8 @@ void Control::_notification(int p_notification) {
 			data.parent_window = nullptr;
 
 			data.theme_owner->clear_theme_on_unparented(this);
+			notify_property_list_changed();
+			update_configuration_warnings();
 		} break;
 
 		case NOTIFICATION_ENTER_TREE: {
@@ -3856,6 +4438,11 @@ void Control::_notification(int p_notification) {
 		} break;
 
 		case NOTIFICATION_EXIT_TREE: {
+			set_process_internal(false);
+			if (_uses_world_space_rendering_runtime()) {
+				_restore_world_space_canvas_parent();
+			}
+			_clear_world_space_runtime_nodes();
 			set_theme_context(nullptr, false);
 
 			release_focus();
@@ -3866,6 +4453,7 @@ void Control::_notification(int p_notification) {
 #ifdef DEBUG_ENABLED
 			connect(SceneStringName(ready), callable_mp(this, &Control::_clear_size_warning), CONNECT_DEFERRED | CONNECT_ONE_SHOT);
 #endif // DEBUG_ENABLED
+			_update_world_space_rendering_state();
 		} break;
 
 		case NOTIFICATION_ENTER_CANVAS: {
@@ -3910,6 +4498,8 @@ void Control::_notification(int p_notification) {
 				ERR_FAIL_NULL(viewport);
 				viewport->connect("size_changed", callable_mp(this, &Control::_size_changed));
 			}
+
+			_update_world_space_rendering_state();
 		} break;
 
 		case NOTIFICATION_EXIT_CANVAS: {
@@ -3940,6 +4530,10 @@ void Control::_notification(int p_notification) {
 		} break;
 
 		case NOTIFICATION_RESIZED: {
+			if (_uses_world_space_rendering_runtime()) {
+				_update_world_space_canvas();
+				_update_world_space_rendering_transform(-1.0);
+			}
 			emit_signal(SceneStringName(resized));
 		} break;
 
@@ -3978,6 +4572,19 @@ void Control::_notification(int p_notification) {
 			} else {
 				update_minimum_size();
 				_size_changed();
+			}
+			if (_uses_world_space_rendering_runtime()) {
+				_update_world_space_rendering_transform(-1.0);
+			}
+		} break;
+
+		case NOTIFICATION_INTERNAL_PROCESS: {
+			if (_uses_world_space_rendering_runtime()) {
+				world_space_rendering.queued_process_delta = get_process_delta_time();
+				if (!world_space_rendering.late_update_queued) {
+					world_space_rendering.late_update_queued = true;
+					callable_mp(this, &Control::_update_world_space_rendering_transform_deferred).call_deferred();
+				}
 			}
 		} break;
 
@@ -4032,6 +4639,30 @@ void Control::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_scale", "scale"), &Control::set_scale);
 	ClassDB::bind_method(D_METHOD("set_pivot_offset", "pivot_offset"), &Control::set_pivot_offset);
 	ClassDB::bind_method(D_METHOD("set_pivot_offset_ratio", "ratio"), &Control::set_pivot_offset_ratio);
+	ClassDB::bind_method(D_METHOD("set_world_space_rendering_enabled", "enabled"), &Control::set_world_space_rendering_enabled);
+	ClassDB::bind_method(D_METHOD("is_world_space_rendering_enabled"), &Control::is_world_space_rendering_enabled);
+	ClassDB::bind_method(D_METHOD("set_world_space_rendering_camera_path", "camera_path"), &Control::set_world_space_rendering_camera_path);
+	ClassDB::bind_method(D_METHOD("get_world_space_rendering_camera_path"), &Control::get_world_space_rendering_camera_path);
+	ClassDB::bind_method(D_METHOD("set_world_space_rendering_camera", "camera"), &Control::set_world_space_rendering_camera);
+	ClassDB::bind_method(D_METHOD("get_world_space_rendering_camera"), &Control::get_world_space_rendering_camera);
+	ClassDB::bind_method(D_METHOD("set_world_space_rendering_near", "near"), &Control::set_world_space_rendering_near);
+	ClassDB::bind_method(D_METHOD("get_world_space_rendering_near"), &Control::get_world_space_rendering_near);
+	ClassDB::bind_method(D_METHOD("set_world_space_rendering_position", "position"), &Control::set_world_space_rendering_position);
+	ClassDB::bind_method(D_METHOD("get_world_space_rendering_position"), &Control::get_world_space_rendering_position);
+	ClassDB::bind_method(D_METHOD("set_world_space_rendering_rotation_degrees", "rotation"), &Control::set_world_space_rendering_rotation_degrees);
+	ClassDB::bind_method(D_METHOD("get_world_space_rendering_rotation_degrees"), &Control::get_world_space_rendering_rotation_degrees);
+	ClassDB::bind_method(D_METHOD("set_world_space_rendering_scale", "scale"), &Control::set_world_space_rendering_scale);
+	ClassDB::bind_method(D_METHOD("get_world_space_rendering_scale"), &Control::get_world_space_rendering_scale);
+	ClassDB::bind_method(D_METHOD("set_world_space_rendering_transform", "transform"), &Control::set_world_space_rendering_transform);
+	ClassDB::bind_method(D_METHOD("get_world_space_rendering_transform"), &Control::get_world_space_rendering_transform);
+	ClassDB::bind_method(D_METHOD("set_world_space_rendering_follow_damping_enabled", "enabled"), &Control::set_world_space_rendering_follow_damping_enabled);
+	ClassDB::bind_method(D_METHOD("is_world_space_rendering_follow_damping_enabled"), &Control::is_world_space_rendering_follow_damping_enabled);
+	ClassDB::bind_method(D_METHOD("set_world_space_rendering_follow_damping_mode", "mode"), &Control::set_world_space_rendering_follow_damping_mode);
+	ClassDB::bind_method(D_METHOD("get_world_space_rendering_follow_damping_mode"), &Control::get_world_space_rendering_follow_damping_mode);
+	ClassDB::bind_method(D_METHOD("set_world_space_rendering_follow_damping", "speed"), &Control::set_world_space_rendering_follow_damping);
+	ClassDB::bind_method(D_METHOD("get_world_space_rendering_follow_damping"), &Control::get_world_space_rendering_follow_damping);
+	ClassDB::bind_method(D_METHOD("set_world_space_rendering_follow_damping_multiplier", "multiplier"), &Control::set_world_space_rendering_follow_damping_multiplier);
+	ClassDB::bind_method(D_METHOD("get_world_space_rendering_follow_damping_multiplier"), &Control::get_world_space_rendering_follow_damping_multiplier);
 	ClassDB::bind_method(D_METHOD("get_begin"), &Control::get_begin);
 	ClassDB::bind_method(D_METHOD("get_end"), &Control::get_end);
 	ClassDB::bind_method(D_METHOD("get_position"), &Control::get_position);
@@ -4271,6 +4902,21 @@ void Control::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "pivot_offset", PROPERTY_HINT_NONE, "suffix:px"), "set_pivot_offset", "get_pivot_offset");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2, "pivot_offset_ratio"), "set_pivot_offset_ratio", "get_pivot_offset_ratio");
 
+	ADD_GROUP("World Space Rendering", "world_space_rendering_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "world_space_rendering_enabled"), "set_world_space_rendering_enabled", "is_world_space_rendering_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "world_space_rendering_camera", PROPERTY_HINT_NODE_PATH_VALID_TYPES, "Camera3D"), "set_world_space_rendering_camera_path", "get_world_space_rendering_camera_path");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "world_space_rendering_near", PROPERTY_HINT_RANGE, "0.001,4096,0.001,or_greater,suffix:m"), "set_world_space_rendering_near", "get_world_space_rendering_near");
+	ADD_SUBGROUP("Transform", "world_space_rendering_transform_");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "world_space_rendering_transform_position", PROPERTY_HINT_NONE, "suffix:m"), "set_world_space_rendering_position", "get_world_space_rendering_position");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "world_space_rendering_transform_rotation_degrees", PROPERTY_HINT_NONE, "suffix:deg"), "set_world_space_rendering_rotation_degrees", "get_world_space_rendering_rotation_degrees");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "world_space_rendering_transform_scale"), "set_world_space_rendering_scale", "get_world_space_rendering_scale");
+	ADD_PROPERTY(PropertyInfo(Variant::TRANSFORM3D, "world_space_rendering_transform", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_world_space_rendering_transform", "get_world_space_rendering_transform");
+	ADD_SUBGROUP("Follow Damping", "world_space_rendering_follow_damping_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "world_space_rendering_follow_damping_enabled"), "set_world_space_rendering_follow_damping_enabled", "is_world_space_rendering_follow_damping_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "world_space_rendering_follow_damping_mode", PROPERTY_HINT_ENUM, "Position,Rotation,Both"), "set_world_space_rendering_follow_damping_mode", "get_world_space_rendering_follow_damping_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "world_space_rendering_follow_damping_speed", PROPERTY_HINT_RANGE, "0.01,256,0.01,or_greater"), "set_world_space_rendering_follow_damping", "get_world_space_rendering_follow_damping");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "world_space_rendering_follow_damping_multiplier", PROPERTY_HINT_RANGE, "0,8,0.01,or_greater"), "set_world_space_rendering_follow_damping_multiplier", "get_world_space_rendering_follow_damping_multiplier");
+
 	ADD_SUBGROUP("Container Sizing", "size_flags_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "size_flags_horizontal", PROPERTY_HINT_FLAGS, "Fill:1,Expand:2,Shrink Center:4,Shrink End:8"), "set_h_size_flags", "get_h_size_flags");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "size_flags_vertical", PROPERTY_HINT_FLAGS, "Fill:1,Expand:2,Shrink Center:4,Shrink End:8"), "set_v_size_flags", "get_v_size_flags");
@@ -4416,6 +5062,9 @@ void Control::_bind_methods() {
 	BIND_ENUM_CONSTANT(TEXT_DIRECTION_AUTO);
 	BIND_ENUM_CONSTANT(TEXT_DIRECTION_LTR);
 	BIND_ENUM_CONSTANT(TEXT_DIRECTION_RTL);
+	BIND_ENUM_CONSTANT(WORLD_SPACE_RENDERING_FOLLOW_DAMPING_POSITION);
+	BIND_ENUM_CONSTANT(WORLD_SPACE_RENDERING_FOLLOW_DAMPING_ROTATION);
+	BIND_ENUM_CONSTANT(WORLD_SPACE_RENDERING_FOLLOW_DAMPING_BOTH);
 
 	ADD_SIGNAL(MethodInfo("resized"));
 	ADD_SIGNAL(MethodInfo("gui_input", PropertyInfo(Variant::OBJECT, "event", PROPERTY_HINT_RESOURCE_TYPE, "InputEvent")));

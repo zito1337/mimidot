@@ -31,13 +31,17 @@
 #pragma once
 
 #include "core/math/transform_2d.h"
+#include "core/math/transform_3d.h"
 #include "core/object/gdvirtual.gen.inc"
 #include "scene/main/canvas_item.h"
 #include "scene/resources/theme.h"
 
+class Camera3D;
 class Viewport;
 class Label;
 class Panel;
+class Sprite3D;
+class SubViewport;
 class ThemeOwner;
 class ThemeContext;
 
@@ -170,6 +174,12 @@ public:
 		TEXT_DIRECTION_INHERITED = TextServer::DIRECTION_INHERITED,
 	};
 
+	enum WorldSpaceRenderingFollowDampingMode {
+		WORLD_SPACE_RENDERING_FOLLOW_DAMPING_POSITION,
+		WORLD_SPACE_RENDERING_FOLLOW_DAMPING_ROTATION,
+		WORLD_SPACE_RENDERING_FOLLOW_DAMPING_BOTH,
+	};
+
 private:
 	struct CComparator {
 		bool operator()(const Control *p_a, const Control *p_b) const {
@@ -292,12 +302,34 @@ private:
 
 		bool localize_numeral_system = true;
 
-		// Extra properties.
+	// Extra properties.
 
-		String tooltip;
-		AutoTranslateMode tooltip_auto_translate_mode = AUTO_TRANSLATE_MODE_INHERIT;
+	String tooltip;
+	AutoTranslateMode tooltip_auto_translate_mode = AUTO_TRANSLATE_MODE_INHERIT;
 
 	} data;
+
+	struct WorldSpaceRenderingData {
+		bool enabled = false;
+		NodePath camera_path;
+		ObjectID camera_id;
+		real_t near_distance = 0.5;
+		Vector3 position;
+		Vector3 rotation_degrees;
+		Vector3 scale = Vector3(1, 1, 1);
+		bool follow_damping_enabled = false;
+		WorldSpaceRenderingFollowDampingMode follow_damping_mode = WORLD_SPACE_RENDERING_FOLLOW_DAMPING_BOTH;
+		real_t follow_damping = 8.0;
+		real_t follow_damping_multiplier = 1.0;
+		bool warned_missing_camera = false;
+		bool smoothing_initialized = false;
+		bool late_update_queued = false;
+		double queued_process_delta = 0.0;
+		RID canvas;
+		SubViewport *viewport = nullptr;
+		Sprite3D *sprite = nullptr;
+		Transform3D smoothed_transform;
+	} world_space_rendering;
 
 	// Dynamic properties.
 
@@ -331,6 +363,20 @@ private:
 	void _update_minimum_size_cache() const;
 	void _update_minimum_size();
 	void _size_changed();
+	bool _is_world_space_rendering_allowed() const;
+	bool _uses_world_space_rendering_runtime() const;
+	Transform2D _get_world_space_canvas_transform() const;
+	Transform3D _get_world_space_camera_target_transform(Camera3D *p_camera) const;
+	Transform3D _get_world_space_local_transform(real_t p_effective_near) const;
+	Transform3D _get_world_space_target_transform(Camera3D *p_camera) const;
+	void _restore_world_space_canvas_parent();
+	void _update_world_space_gui_root();
+	void _ensure_world_space_runtime_nodes();
+	void _clear_world_space_runtime_nodes();
+	void _update_world_space_canvas();
+	void _update_world_space_rendering_transform_deferred();
+	void _update_world_space_rendering_state();
+	void _update_world_space_rendering_transform(double p_delta);
 
 	void _top_level_changed() override {} // Controls don't need to do anything, only other CanvasItems.
 	void _top_level_changed_on_parent() override;
@@ -541,6 +587,31 @@ public:
 	void set_pivot_offset(const Vector2 &p_pivot);
 	Vector2 get_pivot_offset() const;
 	Vector2 get_combined_pivot_offset() const;
+
+	void set_world_space_rendering_enabled(bool p_enabled);
+	bool is_world_space_rendering_enabled() const;
+	void set_world_space_rendering_camera_path(const NodePath &p_camera_path);
+	NodePath get_world_space_rendering_camera_path() const;
+	void set_world_space_rendering_camera(Node *p_camera);
+	Camera3D *get_world_space_rendering_camera() const;
+	void set_world_space_rendering_near(real_t p_near);
+	real_t get_world_space_rendering_near() const;
+	void set_world_space_rendering_position(const Vector3 &p_position);
+	Vector3 get_world_space_rendering_position() const;
+	void set_world_space_rendering_rotation_degrees(const Vector3 &p_rotation);
+	Vector3 get_world_space_rendering_rotation_degrees() const;
+	void set_world_space_rendering_scale(const Vector3 &p_scale);
+	Vector3 get_world_space_rendering_scale() const;
+	void set_world_space_rendering_transform(const Transform3D &p_transform);
+	Transform3D get_world_space_rendering_transform() const;
+	void set_world_space_rendering_follow_damping_enabled(bool p_enabled);
+	bool is_world_space_rendering_follow_damping_enabled() const;
+	void set_world_space_rendering_follow_damping_mode(WorldSpaceRenderingFollowDampingMode p_mode);
+	WorldSpaceRenderingFollowDampingMode get_world_space_rendering_follow_damping_mode() const;
+	void set_world_space_rendering_follow_damping(real_t p_damping);
+	real_t get_world_space_rendering_follow_damping() const;
+	void set_world_space_rendering_follow_damping_multiplier(real_t p_multiplier);
+	real_t get_world_space_rendering_follow_damping_multiplier() const;
 
 	void update_minimum_size();
 
@@ -761,6 +832,7 @@ VARIANT_ENUM_CAST(Control::Anchor);
 VARIANT_ENUM_CAST(Control::LayoutMode);
 VARIANT_ENUM_CAST(Control::LayoutDirection);
 VARIANT_ENUM_CAST(Control::TextDirection);
+VARIANT_ENUM_CAST(Control::WorldSpaceRenderingFollowDampingMode);
 
 // G = get_drag_data_fw, C = can_drop_data_fw, D = drop_data_fw, U = underscore
 #define SET_DRAG_FORWARDING_CD(from, to) from->set_drag_forwarding(Callable(), callable_mp(this, &to::can_drop_data_fw).bind(from), callable_mp(this, &to::drop_data_fw).bind(from));

@@ -2274,7 +2274,8 @@ void VisualShaderEditor::_update_options_menu() {
 	Color unsupported_color = get_theme_color(SNAME("error_color"), EditorStringName(Editor));
 	Color supported_color = get_theme_color(SNAME("warning_color"), EditorStringName(Editor));
 
-	static bool low_driver = GLOBAL_GET("rendering/renderer/rendering_method") == "gl_compatibility";
+	const String rendering_method = GLOBAL_GET("rendering/renderer/rendering_method");
+	const bool low_driver = rendering_method == "gl_compatibility";
 
 	HashMap<String, TreeItem *> folders;
 

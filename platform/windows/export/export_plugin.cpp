@@ -70,59 +70,12 @@ static String fix_path(const String &p_path) {
 
 #endif
 
-static constexpr int MIMI_OPTIMIZER_PROFILE_OFF = 0;
-static constexpr int MIMI_OPTIMIZER_PROFILE_LEAN_3D = 1;
-
-static String get_mimi_optimizer_template_name(bool p_debug, const String &p_arch, const char *p_suffix) {
-	return "windows_" + String(p_debug ? "debug" : "release") + "_" + p_arch + p_suffix + ".exe";
-}
-
-String EditorExportPlatformWindows::_get_mimi_optimizer_template_path(const Ref<EditorExportPreset> &p_preset, bool p_debug) const {
-	ERR_FAIL_COND_V(p_preset.is_null(), String());
-
-	const int profile = p_preset->has("mimi_optimizer/profile") ? int(p_preset->get("mimi_optimizer/profile")) : MIMI_OPTIMIZER_PROFILE_OFF;
-	if (profile == MIMI_OPTIMIZER_PROFILE_OFF) {
-		return String();
-	}
-
-	const String arch = p_preset->get("binary_format/architecture");
-	if (profile == MIMI_OPTIMIZER_PROFILE_LEAN_3D) {
-		if (arch != "x86_64") {
-			return String();
-		}
-		return EditorPaths::get_singleton()->get_export_templates_dir().path_join(GODOT_VERSION_FULL_CONFIG).path_join(get_mimi_optimizer_template_name(p_debug, arch, "_mimi_lean_3d"));
-	}
-
-	return String();
-}
-
 String EditorExportPlatformWindows::_get_template_path_for_export(const Ref<EditorExportPreset> &p_preset, bool p_debug, String *r_error) const {
 	ERR_FAIL_COND_V(p_preset.is_null(), String());
 
 	const String custom_template = String(p_preset->get(p_debug ? "custom_template/debug" : "custom_template/release")).strip_edges();
 	if (!custom_template.is_empty()) {
 		return custom_template;
-	}
-
-	const int profile = p_preset->has("mimi_optimizer/profile") ? int(p_preset->get("mimi_optimizer/profile")) : MIMI_OPTIMIZER_PROFILE_OFF;
-	if (profile != MIMI_OPTIMIZER_PROFILE_OFF) {
-		const String optimizer_template = _get_mimi_optimizer_template_path(p_preset, p_debug);
-		if (optimizer_template.is_empty()) {
-			if (r_error) {
-				*r_error = TTR("The selected Mimi Optimizer profile is currently only available for Windows x86_64 exports.");
-			}
-			return String();
-		}
-		if (!FileAccess::exists(optimizer_template)) {
-			if (p_debug) {
-				return find_export_template(get_template_file_name("debug", p_preset->get("binary_format/architecture")), r_error);
-			}
-			if (r_error) {
-				*r_error = vformat(TTR("The selected Mimi Optimizer template was not found: \"%s\"."), optimizer_template);
-			}
-			return String();
-		}
-		return optimizer_template;
 	}
 
 	return find_export_template(get_template_file_name(p_debug ? "debug" : "release", p_preset->get("binary_format/architecture")), r_error);
@@ -492,22 +445,6 @@ String EditorExportPlatformWindows::get_export_option_warning(const EditorExport
 			if (!icon_path.is_empty() && !FileAccess::exists(icon_path)) {
 				return TTR("Invalid icon path.");
 			}
-		} else if (p_name == "mimi_optimizer/profile") {
-			const int profile = p_preset->has("mimi_optimizer/profile") ? int(p_preset->get("mimi_optimizer/profile")) : MIMI_OPTIMIZER_PROFILE_OFF;
-			if (profile != MIMI_OPTIMIZER_PROFILE_OFF) {
-				const String custom_template = String(p_preset->get("custom_template/release")).strip_edges();
-				if (!custom_template.is_empty()) {
-					return TTR("Custom templates override the selected Mimi Optimizer runtime profile.");
-				}
-
-				Ref<EditorExportPreset> preset_ref(const_cast<EditorExportPreset *>(p_preset));
-				String template_error;
-				const String resolved_template = _get_template_path_for_export(preset_ref, false, &template_error);
-				(void)resolved_template;
-				if (!template_error.is_empty()) {
-					return template_error;
-				}
-			}
 		} else if (p_name == "application/file_version") {
 			String file_version = p_preset->get("application/file_version");
 			if (!file_version.is_empty()) {
@@ -608,7 +545,6 @@ void EditorExportPlatformWindows::get_export_options(List<ExportOption> *r_optio
 	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "application/export_angle", PROPERTY_HINT_ENUM, "Auto,Yes,No"), 0, true));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "application/export_d3d12", PROPERTY_HINT_ENUM, "Auto,Yes,No"), 0, true));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "application/d3d12_agility_sdk_multiarch"), true, true));
-	r_options->push_back(ExportOption(PropertyInfo(Variant::INT, "mimi_optimizer/profile", PROPERTY_HINT_ENUM, "Off,Lean 3D (x86_64)"), MIMI_OPTIMIZER_PROFILE_OFF));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "mimi_optimizer/skip_accesskit_runtime"), false));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "mimi_optimizer/skip_angle_runtime"), false));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "mimi_optimizer/skip_d3d12_runtime"), false));
@@ -863,20 +799,6 @@ bool EditorExportPlatformWindows::has_valid_export_configuration(const Ref<Edito
 		String exe_arch = _get_exe_arch(custom_release);
 		if (arch != exe_arch) {
 			err += vformat(TTR("Mismatching custom release export template executable architecture: found \"%s\", expected \"%s\"."), exe_arch, arch) + "\n";
-		}
-	}
-
-	const int profile = p_preset->has("mimi_optimizer/profile") ? int(p_preset->get("mimi_optimizer/profile")) : MIMI_OPTIMIZER_PROFILE_OFF;
-	const String active_custom_template = String(p_preset->get(p_debug ? "custom_template/debug" : "custom_template/release")).strip_edges();
-	if (profile != MIMI_OPTIMIZER_PROFILE_OFF && active_custom_template.is_empty()) {
-		String template_error;
-		const String optimizer_template = _get_template_path_for_export(p_preset, p_debug, &template_error);
-		if (optimizer_template.is_empty()) {
-			if (!template_error.is_empty()) {
-				err += template_error + "\n";
-			}
-			r_missing_templates = true;
-			valid = false;
 		}
 	}
 

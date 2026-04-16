@@ -1123,6 +1123,38 @@
 			[b]Note:[/b] [member FontFile.oversampling] does [i]not[/i] take [Control] [member scale] into account. This means that scaling up/down will cause bitmap fonts and rasterized (non-MSDF) dynamic fonts to appear blurry or pixelated. To ensure text remains crisp regardless of scale, you can enable MSDF font rendering by enabling [member ProjectSettings.gui/theme/default_font_multichannel_signed_distance_field] (applies to the default project font only), or enabling [b]Multichannel Signed Distance Field[/b] in the import options of a DynamicFont for custom fonts. On system fonts, [member SystemFont.multichannel_signed_distance_field] can be enabled in the inspector.
 			[b]Note:[/b] If the Control node is a child of a [Container] node, the scale will be reset to [code]Vector2(1, 1)[/code] when the scene is instantiated. To set the Control's scale when it's instantiated, wait for one frame using [code]await get_tree().process_frame[/code] then set its [member scale] property.
 		</member>
+		<member name="world_space_rendering_enabled" type="bool" setter="set_world_space_rendering_enabled" getter="is_world_space_rendering_enabled" default="false">
+			If [code]true[/code], this top-level [Control] renders through an internal world-space pass at runtime instead of only drawing as regular screen-space UI.
+			[b]Note:[/b] This is intended for top-level [Control] roots. Nested controls keep using the normal UI workflow.
+		</member>
+		<member name="world_space_rendering_camera" type="NodePath" setter="set_world_space_rendering_camera_path" getter="get_world_space_rendering_camera_path" default="NodePath(&quot;&quot;)">
+			The [Camera3D] used by [member world_space_rendering_enabled]. The same camera can also be assigned from script with [method set_world_space_rendering_camera].
+		</member>
+		<member name="world_space_rendering_near" type="float" setter="set_world_space_rendering_near" getter="get_world_space_rendering_near" default="0.5">
+			The camera-relative depth used for world-space UI rendering. Larger values keep the UI visually the same size on screen, but place it farther into the scene for depth testing.
+			[b]Note:[/b] At runtime, values below the assigned camera's near plane are clamped to that camera near plane.
+		</member>
+		<member name="world_space_rendering_transform_position" type="Vector3" setter="set_world_space_rendering_position" getter="get_world_space_rendering_position" default="Vector3(0, 0, 0)">
+			Additional camera-relative position offset for the world-space UI.
+		</member>
+		<member name="world_space_rendering_transform_rotation_degrees" type="Vector3" setter="set_world_space_rendering_rotation_degrees" getter="get_world_space_rendering_rotation_degrees" default="Vector3(0, 0, 0)">
+			Additional camera-relative rotation for the world-space UI, in degrees.
+		</member>
+		<member name="world_space_rendering_transform_scale" type="Vector3" setter="set_world_space_rendering_scale" getter="get_world_space_rendering_scale" default="Vector3(1, 1, 1)">
+			Additional camera-relative scale for the world-space UI.
+		</member>
+		<member name="world_space_rendering_follow_damping_enabled" type="bool" setter="set_world_space_rendering_follow_damping_enabled" getter="is_world_space_rendering_follow_damping_enabled" default="false">
+			Enables follow damping for the world-space UI so it can ease toward the target camera transform instead of snapping instantly.
+		</member>
+		<member name="world_space_rendering_follow_damping_mode" type="int" setter="set_world_space_rendering_follow_damping_mode" getter="get_world_space_rendering_follow_damping_mode" enum="Control.WorldSpaceRenderingFollowDampingMode" default="2">
+			Chooses which camera movement channels are smoothed when [member world_space_rendering_follow_damping_enabled] is enabled. [code]Position[/code] smooths translation only, [code]Rotation[/code] smooths turning only, and [code]Both[/code] smooths both.
+		</member>
+		<member name="world_space_rendering_follow_damping_speed" type="float" setter="set_world_space_rendering_follow_damping" getter="get_world_space_rendering_follow_damping" default="8.0">
+			The response speed used when [member world_space_rendering_follow_damping_enabled] is enabled. Higher values catch up to the camera faster.
+		</member>
+		<member name="world_space_rendering_follow_damping_multiplier" type="float" setter="set_world_space_rendering_follow_damping_multiplier" getter="get_world_space_rendering_follow_damping_multiplier" default="1.0">
+			Scales how far the damped camera transform is allowed to drift from the live camera. Values below [code]1.0[/code] keep the UI closer to the camera, while values above [code]1.0[/code] exaggerate the lag.
+		</member>
 		<member name="shortcut_context" type="Node" setter="set_shortcut_context" getter="get_shortcut_context">
 			The [Node] which must be a parent of the focused [Control] for the shortcut to be activated. If [code]null[/code], the shortcut can be activated when any control is focused (a global shortcut). This allows shortcuts to be accepted only when the user has a certain area of the GUI focused.
 		</member>

@@ -87,7 +87,6 @@ class ProjectExportDialog : public ConfirmationDialog {
 	TabContainer *options_sections = nullptr;
 	EditorInspector *parameters = nullptr;
 	Control *mimi_optimizer_tab = nullptr;
-	OptionButton *mimi_optimizer_profile = nullptr;
 	CheckButton *mimi_optimizer_skip_accesskit = nullptr;
 	CheckButton *mimi_optimizer_skip_angle = nullptr;
 	CheckButton *mimi_optimizer_skip_d3d12 = nullptr;
@@ -150,7 +149,6 @@ class ProjectExportDialog : public ConfirmationDialog {
 	void _runnable_pressed();
 	void _update_parameters(const String &p_edited_property);
 	void _update_mimi_optimizer_controls();
-	void _mimi_optimizer_profile_selected(int p_index);
 	void _mimi_optimizer_skip_accesskit_toggled(bool p_pressed);
 	void _mimi_optimizer_skip_angle_toggled(bool p_pressed);
 	void _mimi_optimizer_skip_d3d12_toggled(bool p_pressed);

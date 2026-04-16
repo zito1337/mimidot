@@ -60,25 +60,6 @@
 
 #include <zstd.h>
 
-static constexpr int PROJECT_EXPORT_MIMI_OPTIMIZER_PROFILE_OFF = 0;
-static constexpr int PROJECT_EXPORT_MIMI_OPTIMIZER_PROFILE_LEAN_3D = 1;
-
-static String get_mimi_optimizer_template_path(const Ref<EditorExportPreset> &p_preset, bool p_debug) {
-	ERR_FAIL_COND_V(p_preset.is_null(), String());
-
-	const int profile = p_preset->has("mimi_optimizer/profile") ? int(p_preset->get("mimi_optimizer/profile")) : PROJECT_EXPORT_MIMI_OPTIMIZER_PROFILE_OFF;
-	if (profile != PROJECT_EXPORT_MIMI_OPTIMIZER_PROFILE_LEAN_3D) {
-		return String();
-	}
-
-	const String arch = p_preset->get("binary_format/architecture");
-	if (arch != "x86_64") {
-		return String();
-	}
-
-	return EditorPaths::get_singleton()->get_export_templates_dir().path_join(GODOT_VERSION_FULL_CONFIG).path_join("windows_" + String(p_debug ? "debug" : "release") + "_" + arch + "_mimi_lean_3d.exe");
-}
-
 void ProjectExportTextureFormatError::_on_fix_texture_format_pressed() {
 	export_dialog->hide();
 	ProjectSettingsEditor *project_settings = EditorNode::get_singleton()->get_project_settings();
@@ -550,14 +531,10 @@ void ProjectExportDialog::_update_mimi_optimizer_controls() {
 		return;
 	}
 
-	const int profile = current->has("mimi_optimizer/profile") ? int(current->get("mimi_optimizer/profile")) : PROJECT_EXPORT_MIMI_OPTIMIZER_PROFILE_OFF;
 	const bool skip_accesskit = current->has("mimi_optimizer/skip_accesskit_runtime") ? bool(current->get("mimi_optimizer/skip_accesskit_runtime")) : false;
 	const bool skip_angle = current->has("mimi_optimizer/skip_angle_runtime") ? bool(current->get("mimi_optimizer/skip_angle_runtime")) : false;
 	const bool skip_d3d12 = current->has("mimi_optimizer/skip_d3d12_runtime") ? bool(current->get("mimi_optimizer/skip_d3d12_runtime")) : false;
 
-	if (mimi_optimizer_profile) {
-		mimi_optimizer_profile->select(CLAMP(profile, 0, MAX(0, mimi_optimizer_profile->get_item_count() - 1)));
-	}
 	if (mimi_optimizer_skip_accesskit) {
 		mimi_optimizer_skip_accesskit->set_pressed(skip_accesskit);
 	}
@@ -572,17 +549,8 @@ void ProjectExportDialog::_update_mimi_optimizer_controls() {
 	const String custom_release = current->has("custom_template/release") ? String(current->get("custom_template/release")).strip_edges() : String();
 	if (!custom_release.is_empty()) {
 		status = TTR("Custom release template is set, so it overrides Mimi Optimizer for release exports.");
-	} else if (profile == PROJECT_EXPORT_MIMI_OPTIMIZER_PROFILE_OFF) {
+	} else {
 		status = TTR("Uses the standard Windows export template.");
-	} else if (profile == PROJECT_EXPORT_MIMI_OPTIMIZER_PROFILE_LEAN_3D) {
-		const String template_path = get_mimi_optimizer_template_path(current, false);
-		if (template_path.is_empty()) {
-			status = TTR("Lean 3D is currently available only for Windows x86_64 presets.");
-		} else if (FileAccess::exists(template_path)) {
-			status = vformat(TTR("Lean 3D runtime template:\n%s"), template_path);
-		} else {
-			status = vformat(TTR("Lean 3D is selected, but the optimized template is missing:\n%s"), template_path);
-		}
 	}
 
 	if (skip_accesskit || skip_angle || skip_d3d12) {
@@ -601,17 +569,6 @@ void ProjectExportDialog::_update_mimi_optimizer_controls() {
 	if (mimi_optimizer_status) {
 		mimi_optimizer_status->set_text(status);
 	}
-}
-
-void ProjectExportDialog::_mimi_optimizer_profile_selected(int p_index) {
-	if (updating) {
-		return;
-	}
-
-	Ref<EditorExportPreset> current = get_current_preset();
-	ERR_FAIL_COND(current.is_null());
-	current->set("mimi_optimizer/profile", p_index);
-	_update_current_preset();
 }
 
 void ProjectExportDialog::_mimi_optimizer_skip_accesskit_toggled(bool p_pressed) {
@@ -733,7 +690,12 @@ String ProjectExportDialog::get_export_path() {
 }
 
 Ref<EditorExportPreset> ProjectExportDialog::get_current_preset() const {
-	return EditorExport::get_singleton()->get_export_preset(presets->get_current());
+	int current_idx = presets->get_current();
+	if (current_idx < 0 || current_idx >= EditorExport::get_singleton()->get_export_preset_count()) {
+		return Ref<EditorExportPreset>();
+	}
+
+	return EditorExport::get_singleton()->get_export_preset(current_idx);
 }
 
 void ProjectExportDialog::_export_path_changed(const StringName &p_property, const Variant &p_value, const String &p_field, bool p_changing) {
@@ -1826,16 +1788,8 @@ ProjectExportDialog::ProjectExportDialog() {
 	mimi_optimizer_intro->set_focus_mode(Control::FOCUS_ACCESSIBILITY);
 	mimi_optimizer_intro->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
 	mimi_optimizer_intro->set_text("Mimi Optimizer tunes Windows exports for smaller, cleaner runnable builds.");
-	mimi_optimizer_intro->set_tooltip_text("Size reduction works best when a custom lean export template has been installed from source.");
+	mimi_optimizer_intro->set_tooltip_text("Use these toggles to skip optional Windows runtime files that your project does not need.");
 	mimi_optimizer_vb->add_child(mimi_optimizer_intro);
-
-	mimi_optimizer_profile = memnew(OptionButton);
-	mimi_optimizer_profile->set_accessibility_name("Mimi Optimizer Profile");
-	mimi_optimizer_profile->add_item("Off", PROJECT_EXPORT_MIMI_OPTIMIZER_PROFILE_OFF);
-	mimi_optimizer_profile->add_item("Lean 3D (x86_64)", PROJECT_EXPORT_MIMI_OPTIMIZER_PROFILE_LEAN_3D);
-	mimi_optimizer_profile->set_tooltip_text("Selects a smaller Windows runtime template. Lean 3D currently targets x86_64 release exports.");
-	mimi_optimizer_profile->connect(SceneStringName(item_selected), callable_mp(this, &ProjectExportDialog::_mimi_optimizer_profile_selected));
-	mimi_optimizer_vb->add_margin_child("Runtime Profile", mimi_optimizer_profile);
 
 	mimi_optimizer_skip_accesskit = memnew(CheckButton);
 	mimi_optimizer_skip_accesskit->set_text("Skip AccessKit Runtime DLL");

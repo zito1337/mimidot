@@ -71,7 +71,6 @@ class EditorExportPlatformWindows : public EditorExportPlatformPC {
 	Error _process_icon(const Ref<EditorExportPreset> &p_preset, const String &p_src_path, const String &p_dst_path);
 	Error _add_data(const Ref<EditorExportPreset> &p_preset, const String &p_path, bool p_console_icon);
 	Error _code_sign(const Ref<EditorExportPreset> &p_preset, const String &p_path);
-	String _get_mimi_optimizer_template_path(const Ref<EditorExportPreset> &p_preset, bool p_debug) const;
 	String _get_template_path_for_export(const Ref<EditorExportPreset> &p_preset, bool p_debug, String *r_error = nullptr) const;
 
 	String _get_exe_arch(const String &p_path) const;

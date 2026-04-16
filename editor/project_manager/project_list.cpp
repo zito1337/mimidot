@@ -50,6 +50,31 @@
 #include "scene/gui/texture_rect.h"
 #include "scene/resources/image_texture.h"
 
+static Ref<Texture2D> create_project_icon_preview(const Ref<Image> &p_source, const Size2i &p_target_size) {
+	ERR_FAIL_COND_V(p_source.is_null() || p_source->is_empty(), Ref<Texture2D>());
+
+	Ref<Image> source = p_source->duplicate();
+	ERR_FAIL_COND_V(source.is_null() || source->is_empty(), Ref<Texture2D>());
+	if (source->get_format() != Image::FORMAT_RGBA8) {
+		source->convert(Image::FORMAT_RGBA8);
+	}
+
+	const int src_width = source->get_width();
+	const int src_height = source->get_height();
+	const float fit_scale = MIN((float)p_target_size.width / (float)src_width, (float)p_target_size.height / (float)src_height);
+	const int scaled_width = MAX(1, (int)Math::round(src_width * fit_scale));
+	const int scaled_height = MAX(1, (int)Math::round(src_height * fit_scale));
+
+	source->resize(scaled_width, scaled_height, Image::INTERPOLATE_LANCZOS);
+
+	Ref<Image> canvas = Image::create_empty(p_target_size.width, p_target_size.height, false, Image::FORMAT_RGBA8);
+	canvas->fill(Color(0, 0, 0, 0));
+	const Point2i blit_position((p_target_size.width - scaled_width) / 2, (p_target_size.height - scaled_height) / 2);
+	canvas->blit_rect(source, Rect2i(Point2i(), Size2i(scaled_width, scaled_height)), blit_position);
+
+	return ImageTexture::create_from_image(canvas);
+}
+
 void ProjectListItemControl::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_THEME_CHANGED: {
@@ -753,8 +778,7 @@ void ProjectList::_load_project_icon(int p_index) {
 		img.instantiate();
 		Error err = img->load(item.icon.replace_first("res://", item.path + "/"));
 		if (err == OK) {
-			img->resize(default_icon->get_width(), default_icon->get_height(), Image::INTERPOLATE_LANCZOS);
-			icon = ImageTexture::create_from_image(img);
+			icon = create_project_icon_preview(img, Size2i(default_icon->get_width(), default_icon->get_height()));
 		}
 	}
 	if (icon.is_null()) {
